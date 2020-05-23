@@ -40,12 +40,10 @@ const char *get_module_extension(void)
 #endif
 
 static const char *module_bin[] = {
-	"obs-plugins/" BIT_STRING,
 	"../../obs-plugins/" BIT_STRING,
 };
 
-static const char *module_data[] = {"data/%module%",
-				    "../../data/obs-plugins/%module%"};
+static const char *module_data[] = {"../../data/obs-plugins/%module%"};
 
 static const int module_patterns_size =
 	sizeof(module_bin) / sizeof(module_bin[0]);
@@ -61,9 +59,6 @@ char *find_libobs_data_file(const char *file)
 {
 	struct dstr path;
 	dstr_init(&path);
-
-	if (check_path(file, "data/libobs/", &path))
-		return path.array;
 
 	if (check_path(file, "../../data/libobs/", &path))
 		return path.array;
@@ -1269,9 +1264,7 @@ bool initialize_com(void)
 {
 	const HRESULT hr = CoInitializeEx(0, COINIT_APARTMENTTHREADED);
 	const bool success = SUCCEEDED(hr);
-	if (success)
-		blog(LOG_INFO, "CoInitializeEx succeeded: 0x%08X", hr);
-	else
+	if (!success)
 		blog(LOG_ERROR, "CoInitializeEx failed: 0x%08X", hr);
 	return success;
 }

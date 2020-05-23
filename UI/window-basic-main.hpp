@@ -21,6 +21,10 @@
 #include <QAction>
 #include <QWidgetAction>
 #include <QSystemTrayIcon>
+#ifdef _WIN32
+#include <QWinTaskbarButton>
+#include <QWinTaskbarProgress>
+#endif
 #include <QStyledItemDelegate>
 #include <obs.hpp>
 #include <vector>
@@ -170,6 +174,7 @@ class OBSBasic : public OBSMainWindow {
 		DropType_Image,
 		DropType_Media,
 		DropType_Html,
+		DropType_Url,
 	};
 
 private:
@@ -192,6 +197,8 @@ private:
 	const char *copyFiltersString = nullptr;
 	bool copyVisible = true;
 
+	bool closing = false;
+	QScopedPointer<QThread> whatsNewInitThread;
 	QScopedPointer<QThread> updateCheckThread;
 	QScopedPointer<QThread> introCheckThread;
 	QScopedPointer<QThread> logUploadThread;
@@ -237,6 +244,7 @@ private:
 	QPointer<QWidget> stats;
 	QPointer<QWidget> remux;
 	QPointer<QWidget> extraBrowsers;
+	QPointer<QWidget> importer;
 
 	QPointer<QMenu> startStreamMenu;
 
@@ -267,6 +275,11 @@ private:
 	QPointer<QMenu> deinterlaceMenu;
 	QPointer<QMenu> perSceneTransitionMenu;
 	QPointer<QObject> shortcutFilter;
+
+#ifdef _WIN32
+	QWinTaskbarButton *taskBtn = new QWinTaskbarButton(this);
+	QWinTaskbarProgress *taskProg = taskBtn->progress();
+#endif
 
 	QPointer<QWidget> programWidget;
 	QPointer<QVBoxLayout> programLayout;
@@ -390,7 +403,7 @@ private:
 	void ClearQuickTransitionWidgets();
 	void RefreshQuickTransitions();
 	void DisableQuickTransitionWidgets();
-	void EnableQuickTransitionWidgets();
+	void EnableTransitionWidgets(bool enable);
 	void CreateDefaultQuickTransitions();
 
 	QMenu *CreatePerSceneTransitionMenu();
@@ -435,6 +448,9 @@ private:
 	inline void OnDeactivate();
 
 	void AddDropSource(const char *file, DropType image);
+	void AddDropURL(const char *url, QString &name, obs_data_t *settings,
+			const obs_video_info &ovi);
+	void ConfirmDropUrl(const QString &url);
 	void dragEnterEvent(QDragEnterEvent *event) override;
 	void dragLeaveEvent(QDragLeaveEvent *event) override;
 	void dragMoveEvent(QDragMoveEvent *event) override;
@@ -458,6 +474,7 @@ private:
 	void LoadSavedProjectors(obs_data_array_t *savedProjectors);
 
 	void ReceivedIntroJson(const QString &text);
+	void ShowWhatsNew(const QString &url);
 
 #ifdef BROWSER_AVAILABLE
 	QList<QSharedPointer<QDockWidget>> extraBrowserDocks;
@@ -504,8 +521,9 @@ private:
 
 	QSlider *tBar;
 	bool tBarActive = false;
-	bool tBarDown = false;
-	void EnableTBar();
+
+	OBSSource GetOverrideTransition(OBSSource source);
+	int GetOverrideTransitionDuration(OBSSource source);
 
 public slots:
 	void DeferSaveBegin();
@@ -576,6 +594,7 @@ private slots:
 	void ToggleAlwaysOnTop();
 
 	void ReorderSources(OBSScene scene);
+	void RefreshSources(OBSScene scene);
 
 	void ProcessHotkey(obs_hotkey_id id, bool pressed);
 
@@ -654,9 +673,12 @@ private slots:
 	void TBarChanged(int value);
 	void TBarReleased();
 
+	void LockVolumeControl(bool lock);
+
 private:
 	/* OBS Callbacks */
 	static void SceneReordered(void *data, calldata_t *params);
+	static void SceneRefreshed(void *data, calldata_t *params);
 	static void SceneItemAdded(void *data, calldata_t *params);
 	static void SceneItemSelected(void *data, calldata_t *params);
 	static void SceneItemDeselected(void *data, calldata_t *params);
@@ -827,6 +849,8 @@ private slots:
 	void on_actionVerticalCenter_triggered();
 	void on_actionHorizontalCenter_triggered();
 
+	void on_customContextMenuRequested(const QPoint &pos);
+
 	void on_scenes_currentItemChanged(QListWidgetItem *current,
 					  QListWidgetItem *prev);
 	void on_scenes_customContextMenuRequested(const QPoint &pos);
@@ -889,6 +913,7 @@ private slots:
 
 	void on_toggleListboxToolbars_toggled(bool visible);
 	void on_toggleStatusBar_toggled(bool visible);
+	void on_toggleSourceIcons_toggled(bool visible);
 
 	void on_transitions_currentIndexChanged(int index);
 	void on_transitionAdd_clicked();

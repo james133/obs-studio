@@ -34,6 +34,7 @@
 #include <QGuiApplication>
 #include <QProxyStyle>
 #include <QScreen>
+#include <QProcess>
 
 #include "qt-wrappers.hpp"
 #include "obs-app.hpp"
@@ -48,6 +49,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <filesystem>
 #else
 #include <signal.h>
 #include <pthread.h>
@@ -83,6 +85,8 @@ string opt_starting_scene;
 bool remuxAfterRecord = false;
 string remuxFilename;
 
+bool restart = false;
+
 // GPU hint exports for AMD/NVIDIA laptops
 #ifdef _MSC_VER
 extern "C" __declspec(dllexport) DWORD NvOptimusEnablement = 1;
@@ -93,7 +97,8 @@ QObject *CreateShortcutFilter()
 {
 	return new OBSEventFilter([](QObject *obj, QEvent *event) {
 		auto mouse_event = [](QMouseEvent &event) {
-			if (!App()->HotkeysEnabledInFocus())
+			if (!App()->HotkeysEnabledInFocus() &&
+			    event.button() != Qt::LeftButton)
 				return true;
 
 			obs_key_combination_t hotkey = {0, OBS_KEY_NONE};
@@ -423,6 +428,8 @@ bool OBSApp::InitGlobalConfigDefaults()
 	config_set_default_bool(globalConfig, "BasicWindow",
 				"ShowListboxToolbars", true);
 	config_set_default_bool(globalConfig, "BasicWindow", "ShowStatusBar",
+				true);
+	config_set_default_bool(globalConfig, "BasicWindow", "ShowSourceIcons",
 				true);
 	config_set_default_bool(globalConfig, "BasicWindow", "StudioModeLabels",
 				true);
@@ -1321,6 +1328,17 @@ void OBSApp::Exec(VoidFunc func)
 	func();
 }
 
+static void ui_task_handler(obs_task_t task, void *param, bool wait)
+{
+	auto doTask = [=]() {
+		/* to get clang-format to behave */
+		task(param);
+	};
+	QMetaObject::invokeMethod(App(), "Exec",
+				  wait ? WaitConnection() : Qt::AutoConnection,
+				  Q_ARG(VoidFunc, doTask));
+}
+
 bool OBSApp::OBSInit()
 {
 	ProfileScope("OBSApp::OBSInit");
@@ -1331,6 +1349,8 @@ bool OBSApp::OBSInit()
 
 	if (!StartupOBS(locale.c_str(), GetProfilerNameStore()))
 		return false;
+
+	obs_set_ui_task_handler(ui_task_handler);
 
 #ifdef _WIN32
 	bool browserHWAccel =
@@ -1757,7 +1777,15 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 	QGuiApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
 
+#if !defined(_WIN32) && !defined(__APPLE__) && BROWSER_AVAILABLE
+	setenv("QT_NO_GLIB", "1", true);
+#endif
+
 	QCoreApplication::addLibraryPath(".");
+
+#if __APPLE__
+	InstallNSApplicationSubclass();
+#endif
 
 	OBSApp program(argc, argv, profilerNameStore.get());
 	try {
@@ -1841,12 +1869,16 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 
 		prof.Stop();
 
-		return program.exec();
+		ret = program.exec();
 
 	} catch (const char *error) {
 		blog(LOG_ERROR, "%s", error);
 		OBSErrorBox(nullptr, "%s", error);
 	}
+
+	if (restart)
+		QProcess::startDetached(qApp->arguments()[0],
+					qApp->arguments());
 
 	return ret;
 }
@@ -1857,8 +1889,7 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 
 #define CRASH_MESSAGE                                                      \
 	"Woops, OBS has crashed!\n\nWould you like to copy the crash log " \
-	"to the clipboard?  (Crash logs will still be saved to the "       \
-	"%appdata%\\obs-studio\\crashes directory)"
+	"to the clipboard? The crash log will still be saved to:\n\n%s"
 
 static void main_crash_handler(const char *format, va_list args, void *param)
 {
@@ -1867,10 +1898,12 @@ static void main_crash_handler(const char *format, va_list args, void *param)
 	vsnprintf(text, MAX_CRASH_REPORT_SIZE, format, args);
 	text[MAX_CRASH_REPORT_SIZE - 1] = 0;
 
-	delete_oldest_file(true, "obs-studio/crashes");
+	string crashFilePath = "obs-studio/crashes";
 
-	string name = "obs-studio/crashes/Crash ";
-	name += GenerateTimeDateFilename("txt");
+	delete_oldest_file(true, crashFilePath.c_str());
+
+	string name = crashFilePath + "/";
+	name += "Crash " + GenerateTimeDateFilename("txt");
 
 	BPtr<char> path(GetConfigPathPtr(name.c_str()));
 
@@ -1888,7 +1921,26 @@ static void main_crash_handler(const char *format, va_list args, void *param)
 	file << text;
 	file.close();
 
-	int ret = MessageBoxA(NULL, CRASH_MESSAGE, "OBS has crashed!",
+	string pathString(path.Get());
+
+#ifdef _WIN32
+	std::replace(pathString.begin(), pathString.end(), '/', '\\');
+#endif
+
+	string absolutePath =
+		canonical(filesystem::path(pathString)).u8string();
+
+	size_t size = snprintf(nullptr, 0, CRASH_MESSAGE, absolutePath.c_str());
+
+	unique_ptr<char[]> message_buffer(new char[size + 1]);
+
+	snprintf(message_buffer.get(), size + 1, CRASH_MESSAGE,
+		 absolutePath.c_str());
+
+	string finalMessage =
+		string(message_buffer.get(), message_buffer.get() + size);
+
+	int ret = MessageBoxA(NULL, finalMessage.c_str(), "OBS has crashed!",
 			      MB_YESNO | MB_ICONERROR | MB_TASKMODAL);
 
 	if (ret == IDYES) {
@@ -2005,7 +2057,7 @@ bool GetFileSafeName(const char *name, std::string &file)
 		return false;
 
 	wfile.resize(len);
-	os_utf8_to_wcs(name, base_len, &wfile[0], len);
+	os_utf8_to_wcs(name, base_len, &wfile[0], len + 1);
 
 	for (size_t i = wfile.size(); i > 0; i--) {
 		size_t im1 = i - 1;
@@ -2025,7 +2077,7 @@ bool GetFileSafeName(const char *name, std::string &file)
 		return false;
 
 	file.resize(len);
-	os_wcs_to_utf8(wfile.c_str(), wfile.size(), &file[0], len);
+	os_wcs_to_utf8(wfile.c_str(), wfile.size(), &file[0], len + 1);
 	return true;
 }
 

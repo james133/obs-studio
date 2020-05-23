@@ -276,6 +276,11 @@ VolControl::VolControl(OBSSource source_, bool showConfig, bool vertical)
 	VolumeChanged();
 }
 
+void VolControl::EnableSlider(bool enable)
+{
+	slider->setEnabled(enable);
+}
+
 VolControl::~VolControl()
 {
 	obs_fader_remove_callback(obs_fader, OBSVolumeChanged, this);
@@ -870,7 +875,7 @@ void VolumeMeter::paintHMeter(QPainter &painter, int x, int y, int width,
 		painter.fillRect(peakPosition, y,
 				 maximumPosition - peakPosition, height,
 				 backgroundErrorColor);
-	} else {
+	} else if (int(magnitude) != 0) {
 		if (!clipping) {
 			QTimer::singleShot(CLIP_FLASH_DURATION_MS, this,
 					   SLOT(ClipEnding()));
